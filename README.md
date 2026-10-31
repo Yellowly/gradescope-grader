@@ -24,7 +24,7 @@ Gradescope is a Python package project designed to provide seamless interaction 
 ## [Installation](https://pypi.org/project/gradescope-tool/)
 
 ```bash
-pip install gradescope-tool
+pip install git+https://github.com/Yellowly/gradescope-grader
 ```
 
 ---
