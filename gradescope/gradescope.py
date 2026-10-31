@@ -9,8 +9,8 @@ import logging as log
 from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs
-from typing import overload, Literal
-from .dataclass import Course, Assignment, StudentAssignment, Member, Submission
+from typing import Any, Iterable, overload, Literal
+from .dataclass import ContentItem, Course, Assignment, Question, QuestionSubmission, RubricItem, StudentAssignment, Member, Submission, SubmissionViewer
 from .errors import LoginError, NotLoggedInError, ResponseError
 from .constants import BASE_URL, LOGIN_URL, GRADEBOOK, PAST_SUBMISSIONS, ROLE_MAP, Role
 
@@ -41,6 +41,7 @@ class Gradescope:
         self.password = password
         self.verbose = verbose
         self.logged_in = False
+        self.csrf_token: str | None = None
 
         if self.verbose:
             log.basicConfig(level=log.INFO)
@@ -571,3 +572,187 @@ class Gradescope:
             datetime: The converted datetime object.
         '''
         return datetime.strptime(text, '%Y-%m-%dT%H:%M')
+    
+    def get_rubric_items(self, assignment: Assignment) -> list[RubricItem]:
+        if not self.logged_in:
+            raise NotLoggedInError
+
+        response = self.session.get(assignment.get_url() + '/rubric/edit')
+        self._response_check(response)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        rubric_data = soup.find('div', {'data-react-class': 'AssignmentRubric'})
+
+        rubric_items = list()
+        if rubric_data:
+            rubric_data = json.loads(rubric_data.get('data-react-props'))
+            if 'rubric_items' in rubric_data:
+                for data in rubric_data['rubric_items']:
+                    rubric_items.append(
+                        RubricItem(
+                            id=data.get('id'),
+                            description=data.get('description'),
+                            weight=data.get('weight'),
+                            position=data.get('position'),
+                            group_id=data.get('group_id'),
+                            locked=data.get('locked'),
+                            question_id=data.get('question_id')
+                        )
+                    )
+                return rubric_items
+            else:
+                raise ResponseError(
+                    f'Rubric is empty for assignment ID: {assignment.assignment_id}'
+                )
+        raise ResponseError(
+            f'Rubric not found for as ID: {assignment.assignment_id}'
+        )
+        
+    def _parse_questions(self, questions: list[dict[str, Any]]):
+        res: list[Question] = list()
+        for data in questions:
+            if 'content' in data and data['content'] is not None:
+                data['content'] = [ContentItem(**item) for item in data['content']]
+            
+            if 'children' in data and data['children'] is not None:
+                data['children'] = self._parse_questions(data['children'])
+                
+            res.append(Question(**data))
+        return res
+        
+    def get_questions(self, assignment: Assignment) -> list[Question]:
+        if not self.logged_in:
+            raise NotLoggedInError
+
+        response = self.session.get(assignment.get_url() + '/rubric/edit')
+        self._response_check(response)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        assignment_data = soup.find('div', {'data-react-class': 'AssignmentRubric'})
+
+        questions = list()
+        if assignment_data:
+            assignment_data = json.loads(assignment_data.get('data-react-props'))
+            if 'questions' in assignment_data:
+                return self._parse_questions(assignment_data['questions'])
+            else:
+                raise ResponseError(
+                    f'Questions is empty for assignment ID: {assignment.assignment_id}'
+                )
+        raise ResponseError(
+            f'Questions not found for as ID: {assignment.assignment_id}'
+        )
+        
+    def get_submission_ids(self, assignment: Assignment) -> list[int]:
+        
+        # This might not work if submissions get paginated?
+        if not self.logged_in:
+            raise NotLoggedInError
+
+        response = self.session.get(assignment.get_url() + '/submissions')
+        self._response_check(response)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        td_elements = soup.find_all('td', class_='table--primaryLink')
+        
+        ids = set()
+        for elem in td_elements:
+            try:
+                submission_id = int(elem.a['href'].split('/submissions/')[1])
+                ids.add(submission_id)
+            except:
+                pass
+            
+        return list(ids)
+        
+    def view_submission(self, assignment: Assignment, submission_id: int) -> SubmissionViewer:
+        if not self.logged_in:
+            raise NotLoggedInError
+        
+        response = self.session.get(f'{assignment.get_url()}/submissions/{submission_id}')
+        self._response_check(response)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        submission_data = soup.find('div', {'data-react-class': 'AssignmentSubmissionViewer'})
+
+        if submission_data:
+            submission_data = json.loads(submission_data.get('data-react-props'))
+            
+            questions = list()
+            if 'questions' in submission_data:
+                for data in submission_data['questions']:
+                    # lazy
+                    if 'content' in data and data['content'] is not None:
+                        data['content'] = [ContentItem(**item) for item in data['content']]
+                    questions.append(data)
+            else:
+                raise ResponseError(
+                    f'Questions is empty for assignment/submission ID: {assignment.assignment_id}/{submission_id}'
+                )
+                
+            question_submissions = list()
+            if 'question_submissions' in submission_data:
+                for data in submission_data['question_submissions']:
+                    question_submissions.append(QuestionSubmission(**data))
+            else:
+                raise ResponseError(
+                    f'Question Submissions is empty for assignment/submission ID: {assignment.assignment_id}/{submission_id}'
+                )
+            
+            rubric_items = list()
+            if 'rubric_items' in submission_data:
+                for data in submission_data['rubric_items']:
+                    rubric_items.append(RubricItem(**data))
+            else:
+                raise ResponseError(
+                    f'Rubric Items is empty for assignment/submission ID: {assignment.assignment_id}/{submission_id}'
+                )
+
+            res = SubmissionViewer(
+                submission_id = submission_id,
+                **submission_data
+            )
+            res.questions=questions
+            res.question_submissions=question_submissions
+            res.rubric_items=rubric_items
+            return res
+        else:
+            raise ResponseError(
+                f'Questions not found for as ID: {assignment.assignment_id}'
+            )
+        
+    def grade_question(self, submission: SubmissionViewer, question: QuestionSubmission, rubric_items: Iterable[RubricItem], point_adjustment: int | float | None = None, comments: str | None = None):
+        if not self.logged_in:
+            raise NotLoggedInError
+        
+        if not question in submission.question_submissions:
+            raise LookupError(f"Question submission {question.id} is not in submission {submission.submission_id}")
+
+        question_rubric = list(filter(lambda r: r.question_id == question.question_id, submission.rubric_items))
+    
+        post_response = {
+            'rubric_items': {str(r.id): {'score': 'false'} for r in question_rubric},
+            'question_submission_evaluation': {'points': None, 'comments': None}
+        }
+        for rubric_item in rubric_items:
+            if rubric_item.question_id != question.question_id:
+                raise Exception(f"Question id of rubric item {rubric_item.question_id} does not match question submission {question.question_id}")
+            
+            post_response['rubric_items'][str(rubric_item.id)] = {'score': 'true'}
+        
+        grader_url = question.get_grader_url()
+        
+        if self.csrf_token == None:
+            response = self.session.get(grader_url)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            csrf_token_elem = soup.find('meta', {'name': 'csrf-token'})
+            if csrf_token_elem is None:
+                raise ResponseError("Could not find ")
+            
+            self.csrf_token = csrf_token_elem['content']
+        
+        headers = {
+            'content-type': 'application/json',
+            'x-csrf-token': self.csrf_token,
+            'x-requested-with': 'XMLHttpRequest',
+            'referer': grader_url,
+            'accept': 'application/json, text/javascript, */*; q=0.01',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36'
+        }
+        return self.session.post(grader_url.removesuffix('grade') + 'save_grade', json = post_response, headers = headers)

@@ -1,6 +1,7 @@
 # dataclass.py
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin
 from .constants import BASE_URL, Role
 
@@ -104,3 +105,105 @@ class Submission:
     def get_file_url(self) -> str:
         '''Returns the URL to download the submission file.'''
         return urljoin(BASE_URL, self.url + '.zip')
+
+
+@dataclass
+class RubricItem:
+    id: int
+    description: str
+    weight: str
+    position: int
+    question_id: int
+    locked: bool | None = None
+    group_id: int | None = None
+    source_id: int | None = None
+    present: bool | None = None
+    
+    
+@dataclass
+class ContentItem:
+    type: str
+    value: str | None = None
+    choices: list[dict[str, Any]] | None = None # TODO: create another dataclass for choices
+
+
+@dataclass
+class Question:
+    id: int
+    parent_id: int | None
+    index: int
+    type: str
+    title: str
+    weight: str
+    scoring_type: str
+    floor: bool
+    ceiling: bool
+    content: list[ContentItem]
+    crop_rect_list: list[Any] | None
+    children: list[Question] | None
+    full_index: str
+    full_answer_key: bool
+    
+    def get_rubric(self, rubric_items: list[RubricItem]):
+        return filter(lambda r: r.question_id == self.id, rubric_items)
+    
+    def get_child(self, full_index: str):
+        if self.children == None:
+            raise Exception(f"Question {self.id} has no children")
+        return next(filter(lambda q: q.full_index == full_index, self.children))
+    
+    
+@dataclass
+class QuestionSubmission:
+    question_id: int
+    data: dict[str, Any]
+    active: bool
+    answers: dict[str, str]
+    id: int
+    score: float | None = None
+    evaluations: list[Any] = field(default_factory = list)
+    grade_path: str = ""
+    annotations: list[Any] = field(default_factory = list)
+    
+    def get_grader_url(self):
+        return urljoin(BASE_URL, self.grade_path)
+    
+    
+@dataclass
+class SubmissionViewer:
+    submission_id: int
+    questions: list[dict[str, Any]]
+    question_submissions: list[QuestionSubmission]
+    rubric_items: list[RubricItem]
+    assignment: dict
+    assignment_level_rubric: bool
+    assignment_submission: dict
+    course_members: list
+    current_user: dict
+    grades_visible: bool
+    hide_email_addresses: bool
+    student_hide_email_addresses: bool
+    image_attachments: list
+    inorder_leaf_question_ids: list
+    outline: list
+    ownerships: list
+    inactive: bool
+    past_submissions: list
+    paths: dict
+    regrade_requests: list
+    rubric_item_groups: list
+    successful_submission_modal: dict
+    text_files: list
+    text_annotations_enabled: bool
+    rubric_annotation_association_enabled: bool
+    quickmarks_enabled: bool
+    show_outline_header_message: bool
+    container: str | None = None
+    pdf_attachment: str | None = None
+    successful_submission: str | None = None
+    
+    def get_question_submission(self, question: Question):
+        for s in self.question_submissions:
+            if s.question_id == question.id:
+                return s
+        raise IndexError(f"Could not find question {question.id} in this submission")
